@@ -1,0 +1,203 @@
+#!/bin/bash
+
+# Authors:
+#   Gleb Golubitsky <sectoid@gnolltech.org>
+
+# Copyright (C) 2012 Gleb Golubitsky
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+## DOCUMENTATION
+
+# Sequence:
+#  1) Get
+#   - clone
+#   - checkout
+#   - submodule
+#   - strip
+#  2) Prepare
+#   - repo-specific-hook
+#  3) Switch
+#   - dir_switch
+#   - reload?
+
+# Config files:
+#  /etc/web-deploy/deploy.conf
+
+. /etc/web-deploy/deploy.conf
+#. ./deploy.conf
+
+DEPLOY_REV=
+
+DEPLOY_ROOT=
+DEPLOY_DIR=
+DEPLOY_PATH=
+
+FORCE_MODE=0
+
+usage()
+{
+cat << EOF
+Usage: $0 [-f] <ref> <instance>
+
+This script deploys <ref> from configured git-repository to
+configured <instance>.
+
+Configuration file: /etc/minfin/deploy.conf
+
+OPTIONS:
+   -f      Force mode. Remove destination directory if present.
+EOF
+}
+
+error() {
+    echo $* 1>&2
+}
+
+step_get() {
+    if [ -d "$DEPLOY_PATH" ]; then
+        echo "$DEPLOY_PATH already exists."
+        if [ "$FORCE_MODE" != "1" ]; then
+            echo "Exiting..."
+            return 1
+        else
+            echo "Running forced mode. Cleaning up."
+            rm -rf $DEPLOY_PATH
+        fi
+    fi
+
+    echo "Cloning repository..."
+    git clone $GIT_REPO $DEPLOY_PATH > /dev/null
+    if [ $? -ne 0 ]; then
+        error "Unable to clone $GIT_REPO to $DEPLOY_PATH"
+        rm -rf $DEPLOY_PATH
+        return 1
+    fi
+
+    echo "Checking out $DEPLOY_REV..."
+    pushd $DEPLOY_PATH > /dev/null
+    git checkout -q -f $DEPLOY_REV > /dev/null
+    if [ $? -ne 0 ]; then
+        error "Unable to checkout $DEPLOY_REV (in $DEPLOY_PATH)"
+        popd > /dev/null
+        rm -rf $DEPLOY_PATH
+        return 1
+    fi
+    
+    echo "Getting submodules..."
+    git submodule update --init > /dev/null
+    if [ $? -ne 0 ]; then
+        error "Unable to load submodules (in $DEPLOY_PATH)"
+        popd > /dev/null
+        rm -rf $DEPLOY_PATH
+        return 1
+    fi
+
+    # TODO: Do we really need this?
+    echo "Stripping git history..."
+    rm -rf .git > /dev/null
+    popd > /dev/null
+}
+
+do_link() {
+    TYPE=$1
+    TO=$2
+    FROM=$3
+    
+    if [ -z "$TYPE" ]; then
+        error "Specify link type!"
+        return 1
+    fi
+
+    if [ -z "$TO" ]; then
+        error "Specify link destination!"
+        return 1
+    fi
+
+    if [ -z "$FROM" ]; then
+        FROM=$TO
+    fi
+
+    ln -s $DEPLOY_ROOT/$TYPE/$FROM $TO
+}
+
+link_config() {
+    do_link conf $1 $2
+}
+
+link_content() {
+    do_link content $1 $2
+}
+
+link_cache() {
+    do_link cache $1 $2
+}
+
+
+step_prepare() {
+    pushd $DEPLOY_PATH > /dev/null
+    
+    # if deploy/post-deploy.sh filex exists -- process it
+    if [ -r deploy/prepare-instance.sh ]; then
+        echo "Processing prepare-instance hook"
+        . deploy/prepare-instance.sh
+    fi
+    
+    popd > /dev/null
+}
+
+step_switch() {
+    pushd $DEPLOY_ROOT > /dev/null
+    ln -nvsf release-$DEPLOY_REV release
+    popd > /dev/null
+}
+
+if [ "$1" == "-f" ]; then
+    FORCE_MODE=1
+    shift
+fi
+
+DEPLOY_REV="$1"
+
+if [ -z "$DEPLOY_REV" ]; then
+    error "Please specify correct ref to deploy. This can be tag/branch_name/commit."
+    usage
+    exit -1
+fi
+
+DEPLOY_INSTANCE="$2"
+
+GIT_REPO=$(eval echo \$${DEPLOY_INSTANCE}_REPO)
+DEPLOY_ROOT=$(eval echo \$${DEPLOY_INSTANCE}_ROOT)
+
+if [ -z "$DEPLOY_ROOT" ]; then
+    error "Please specify correct instance to deploy to. Instance should be configured in /etc/minfin/deploy.conf"
+    usage
+    exit -1
+fi
+
+if [ ! -d "$DEPLOY_ROOT" ]; then
+    error "Please specify correct instance to deploy to. The instance directory should exits"
+    exit -1
+fi
+
+if [ -z "$GIT_REPO" ]; then
+    error "Please specify Git repository URI"
+    exit -1
+fi
+
+DEPLOY_DIR="release-${DEPLOY_REV}"
+DEPLOY_PATH=$DEPLOY_ROOT/$DEPLOY_DIR
+
+step_get && step_prepare && step_switch
